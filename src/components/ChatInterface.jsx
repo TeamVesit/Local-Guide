@@ -19,7 +19,6 @@ import {
   Restaurant,
   Hotel,
   LocalActivity,
-  FiberManualRecord,
   Attractions,
   DirectionsBus,
   Info,
@@ -51,8 +50,22 @@ function ChatInterface({ selectedPlace, userLocation, onLocationSearch }) {
 
   useEffect(scrollToBottom, [messages]);
 
-  const generatePrompt = (userInput, place, location) => {
-    return `As a local guide AI, help with: ${userInput}
+  useEffect(() => {
+    const initializeVoices = () => {
+      const voices = window.speechSynthesis.getVoices();
+      if (voices.length > 0) {
+        setSelectedVoice(voices[0]);
+      }
+    };
+
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+      window.speechSynthesis.onvoiceschanged = initializeVoices;
+      initializeVoices();
+    }
+  }, []);
+
+  const generatePrompt = (userInput, place, location) => `
+    As a local guide AI, help with: ${userInput}
     ${place ? `Regarding: ${place.place_name}` : ""}
     Current location: Lat ${location.lat}, Lng ${location.lng}
     Please provide detailed, local-specific advice including:
@@ -60,8 +73,8 @@ function ChatInterface({ selectedPlace, userLocation, onLocationSearch }) {
     - Cultural insights
     - Practical tips
     - Transportation options
-    - Time-specific recommendations;`;
-  };
+    - Time-specific recommendations.
+  `;
 
   const handleQuickPrompt = (prompt) => {
     setInput(prompt.label);
@@ -73,6 +86,15 @@ function ChatInterface({ selectedPlace, userLocation, onLocationSearch }) {
       /(?:in|at|to|visit)\s+([A-Za-z\s,]+)(?=[\s.,]|$)/i
     );
     return locationWords ? locationWords[1].trim() : null;
+  };
+
+  const sanitizeText = (text) => {
+    return text
+      .replace(/(\*\*.*?\*\*)/g, "\n\n$1\n\n")
+      .replace(/(\*.*?\*)/g, "\n• $1")
+      .replace(/[\*\*|\*]/g, "")
+      .replace(/\n+/g, "\n")
+      .trim();
   };
 
   const handleSend = async (customInput) => {
@@ -94,19 +116,18 @@ function ChatInterface({ selectedPlace, userLocation, onLocationSearch }) {
       const prompt = generatePrompt(messageText, selectedPlace, userLocation);
 
       const result = await model.generateContent(prompt);
-      const response = await result.response;
-      const aiMessage = { text: response.text(), sender: "ai" };
+      const rawResponse = await result.response;
+      const aiResponseText = rawResponse.text();
+
+      const sanitizedResponse = sanitizeText(aiResponseText);
+      const aiMessage = { text: sanitizedResponse, sender: "ai" };
 
       setMessages((prev) => [...prev, aiMessage]);
 
-      // If voice is enabled, sanitize and speak the response
       if (isVoiceEnabled && selectedVoice) {
-        const sanitizedResponse = sanitizeText(response.text());
-
         const utterance = new SpeechSynthesisUtterance(sanitizedResponse);
         utterance.voice = selectedVoice;
 
-        // Stop any ongoing speech before speaking new text
         window.speechSynthesis.cancel();
         window.speechSynthesis.speak(utterance);
       }
@@ -124,96 +145,61 @@ function ChatInterface({ selectedPlace, userLocation, onLocationSearch }) {
     }
   };
 
-  // Function to sanitize text by removing unwanted symbols (e.g., asterisks, special characters)
-  const sanitizeText = (text) => {
-    return text.replace(/[\*\*\*\*\*\*]+/g, "").replace(/[^\w\s.,!?]/g, "");
-  };
-
   const formatAIResponse = (response) => {
     const createSection = (title, icon, content) => (
-      <Box sx={{ mb: 2 }}>
+      <Box sx={{ mb: 3 }}>
         <Box sx={{ display: "flex", alignItems: "center", mb: 1 }}>
           {icon}
-          <Typography variant="subtitle1" sx={{ fontWeight: "bold", ml: 1 }}>
+          <Typography variant="h6" sx={{ fontWeight: "bold", ml: 1 }}>
             {title}
           </Typography>
         </Box>
-        <Box sx={{ pl: 2 }}>{content}</Box>
+        <Box sx={{ pl: 2 }}>
+          {Array.isArray(content) ? (
+            content.map((item, index) => (
+              <Typography key={index} variant="body2" sx={{ mb: 0.5 }}>
+                • {item.trim()}
+              </Typography>
+            ))
+          ) : (
+            <Typography variant="body2">{content.trim()}</Typography>
+          )}
+        </Box>
       </Box>
     );
 
-    const formatListItems = (text) => {
-      return text.split("*").map((item, index) => {
-        if (item.trim() === "") return null;
-        return (
-          <Box
-            key={index}
-            sx={{ display: "flex", alignItems: "flex-start", mb: 0.5 }}
-          >
-            <FiberManualRecord sx={{ fontSize: 8, mt: 1, mr: 1 }} />
-            <Typography variant="body2">{item.trim()}</Typography>
-          </Box>
-        );
-      });
+    const extractSection = (title) => {
+      const regex = new RegExp(`\\*\\*${title}:?\\*\\*(.*?)(?=\\*\\*|$)`, "s");
+      const match = response.match(regex);
+      return match ? match[1].trim().split("\n").filter(Boolean) : null;
     };
 
-    const sections = {
-      location: response.match(/^(.*?)(?=\*\*|$)/s)?.[0],
-      hotels: response.match(/\*\*Hotels Nearby.*?\*\*(.*?)(?=\*\*|$)/s)?.[1],
-      attractions: response.match(
-        /\*\*Local Attractions:\*\*(.*?)(?=\*\*|$)/s
-      )?.[1],
-      cultural: response.match(
-        /\*\*Cultural Insights:\*\*(.*?)(?=\*\*|$)/s
-      )?.[1],
-      practical: response.match(/\*\*Practical Tips:\*\*(.*?)(?=\*\*|$)/s)?.[1],
-      time: response.match(/\*\*Time-Specific.*?\*\*(.*?)(?=\*\*|$)/s)?.[1],
-      finding: response.match(/\*\*Finding Hotels:\*\*(.*?)(?=\*\*|$)/s)?.[1],
-    };
+    const sections = [
+      { title: "Local Attractions", icon: <Attractions color="primary" /> },
+      { title: "Cultural Insights", icon: <Info color="primary" /> },
+      { title: "Practical Tips", icon: <Restaurant color="secondary" /> },
+      {
+        title: "Transportation Options",
+        icon: <DirectionsBus color="success" />,
+      },
+      {
+        title: "Time-Specific Recommendations",
+        icon: <Schedule color="primary" />,
+      },
+    ];
 
     return (
-      <Box sx={{ "& > *": { mb: 2 } }}>
-        {sections.location && (
+      <Box sx={{ "& > *": { mb: 3 } }}>
+        {response.split("**")[0] && (
           <Typography variant="body1" sx={{ mb: 2 }}>
-            {sections.location.trim()}
+            {response.split("**")[0].trim()}
           </Typography>
         )}
-        {sections.hotels &&
-          createSection(
-            "Hotels Nearby",
-            <Hotel color="primary" />,
-            formatListItems(sections.hotels)
-          )}
-        {sections.attractions &&
-          createSection(
-            "Local Attractions",
-            <Attractions color="primary" />,
-            formatListItems(sections.attractions)
-          )}
-        {sections.cultural &&
-          createSection(
-            "Cultural Insights",
-            <Restaurant color="primary" />,
-            formatListItems(sections.cultural)
-          )}
-        {sections.practical &&
-          createSection(
-            "Practical Tips",
-            <Info color="primary" />,
-            formatListItems(sections.practical)
-          )}
-        {sections.time &&
-          createSection(
-            "Time-Specific Recommendations",
-            <Schedule color="primary" />,
-            formatListItems(sections.time)
-          )}
-        {sections.finding &&
-          createSection(
-            "Additional Hotel Information",
-            <LocationOn color="primary" />,
-            <Typography variant="body2">{sections.finding.trim()}</Typography>
-          )}
+
+        {sections.map(({ title, icon }) => {
+          const content = extractSection(title);
+          return content ? createSection(title, icon, content) : null;
+        })}
       </Box>
     );
   };
@@ -230,7 +216,6 @@ function ChatInterface({ selectedPlace, userLocation, onLocationSearch }) {
 
   const handleToggleVoice = () => {
     if (isVoiceEnabled) {
-      // Stop speaking when toggling voice off
       window.speechSynthesis.cancel();
     }
     setIsVoiceEnabled((prev) => !prev);
@@ -288,32 +273,31 @@ function ChatInterface({ selectedPlace, userLocation, onLocationSearch }) {
         </IconButton>
       </Box>
 
-      <Box sx={{ p: 2 }}>
+      <Divider />
+      <Box sx={{ px: 2, py: 1 }}>
         <FormControlLabel
           control={
-            <Switch
-              checked={isVoiceEnabled}
-              onChange={handleToggleVoice}
-              name="voice-toggle"
-              color="primary"
-            />
+            <Switch checked={isVoiceEnabled} onChange={handleToggleVoice} />
           }
-          label="Enable Voice"
+          label="Enable voice"
         />
         {isVoiceEnabled && (
-          <Box>
-            <Typography variant="body2" sx={{ mt: 2 }}>
-              Select Voice
-            </Typography>
-            <select onChange={handleVoiceSelect} defaultValue="">
-              <option value="">Choose a Voice</option>
-              {window.speechSynthesis.getVoices().map((voice, index) => (
-                <option key={index} value={voice.name}>
-                  {voice.name}
-                </option>
-              ))}
-            </select>
-          </Box>
+          <TextField
+            select
+            label="Voice"
+            value={selectedVoice?.name || ""}
+            onChange={handleVoiceSelect}
+            SelectProps={{ native: true }}
+            variant="outlined"
+            size="small"
+            sx={{ mt: 1 }}
+          >
+            {window.speechSynthesis.getVoices().map((voice, index) => (
+              <option key={index} value={voice.name}>
+                {voice.name} ({voice.lang})
+              </option>
+            ))}
+          </TextField>
         )}
       </Box>
     </Paper>
